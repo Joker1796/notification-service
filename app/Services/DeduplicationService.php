@@ -25,12 +25,16 @@ class DeduplicationService
 
     /**
      * Remove only keys owned by this service (used in tests instead of flushdb).
+     * Uses SCAN instead of KEYS to avoid blocking Redis on large keyspaces.
      */
     public function flush(): void
     {
-        $keys = Redis::keys(self::PREFIX . '*');
-        if (!empty($keys)) {
-            Redis::del($keys);
-        }
+        $cursor = 0;
+        do {
+            [$cursor, $keys] = Redis::scan($cursor, ['match' => self::PREFIX . '*', 'count' => 100]);
+            if (!empty($keys)) {
+                Redis::del($keys);
+            }
+        } while ((int) $cursor !== 0);
     }
 }

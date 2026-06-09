@@ -68,9 +68,9 @@ class NotificationController extends Controller
         );
 
         return response()->json([
-            'batch_id' => $batch->id,
+            'batch_id'       => $batch->id,
             'accepted_count' => $batch->total_count,
-            'status' => $batch->status,
+            'status'         => $batch->status->value,
         ], 202);
     }
 
@@ -112,28 +112,28 @@ class NotificationController extends Controller
      */
     public function subscriberNotifications(Request $request, int $subscriberId): JsonResponse
     {
-        $perPage = min((int) $request->query('per_page', 50), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 50), 100));
 
         $paginator = $this->service->getSubscriberNotifications($subscriberId, $perPage);
 
         return response()->json([
             'subscriber_id' => $subscriberId,
             'data' => array_map(fn ($n) => [
-                'id' => $n->id,
-                'batch_id' => $n->batch_id,
-                'channel' => $n->channel->value,
-                'type' => $n->type->value,
-                'message' => $n->message,
-                'status' => $n->status->value,
+                'id'          => $n->id,
+                'batch_id'    => $n->batch_id,
+                'channel'     => $n->channel->value,
+                'type'        => $n->type->value,
+                'message'     => $n->message,
+                'status'      => $n->status->value,
                 'retry_count' => $n->retry_count,
-                'created_at' => $n->created_at?->toIso8601String(),
-                'updated_at' => $n->updated_at?->toIso8601String(),
+                'created_at'  => $n->created_at?->toIso8601String(),
+                'updated_at'  => $n->updated_at?->toIso8601String(),
             ], $paginator->items()),
             'meta' => [
                 'current_page' => $paginator->currentPage(),
-                'per_page' => $paginator->perPage(),
-                'total' => $paginator->total(),
-                'last_page' => $paginator->lastPage(),
+                'per_page'     => $paginator->perPage(),
+                'total'        => $paginator->total(),
+                'last_page'    => $paginator->lastPage(),
             ],
         ]);
     }

@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Enums\NotificationBatchStatus;
 use App\Enums\NotificationStatus;
 use App\Exceptions\TemporaryProviderException;
 use App\Models\Notification;
@@ -38,8 +39,6 @@ class ProcessNotificationJob implements ShouldQueue
             return;
         }
 
-        $this->notification->refresh();
-
         try {
             $factory->make($this->notification->channel)
                 ->send($this->notification->subscriber_id, $this->notification->message);
@@ -47,9 +46,11 @@ class ProcessNotificationJob implements ShouldQueue
             $this->notification->update(['status' => NotificationStatus::Delivered]);
             NotificationBatch::where('id', $this->notification->batch_id)->increment('completed_count');
             $this->finalizeBatchIfComplete();
-        } catch (TemporaryProviderException $e) {
-            // Single UPDATE keeps retry_count and status consistent even under DB failures.
-            $this->notification->update([
+        } catch (Throwable $e) {
+            // Use query builder (not model->update) to bypass Eloquent's dirty-flag check.
+            // The in-memory model still has status=Queued (from before the claim), so
+            // model->update(['status' => Queued]) would see no change and skip the column.
+            Notification::where('id', $this->notification->id)->update([
                 'status'      => NotificationStatus::Queued,
                 'retry_count' => DB::raw('retry_count + 1'),
                 'last_error'  => $e->getMessage(),
@@ -70,12 +71,15 @@ class ProcessNotificationJob implements ShouldQueue
 
     private function finalizeBatchIfComplete(): void
     {
+        $completed = NotificationBatchStatus::Completed->value;
+        $partial   = NotificationBatchStatus::PartialFailure->value;
+
         // Single atomic UPDATE: only runs when all notifications in the batch are done.
         NotificationBatch::where('id', $this->notification->batch_id)
             ->whereRaw('completed_count + failed_count = total_count')
-            ->whereNotIn('status', ['completed', 'partial_failure'])
+            ->whereNotIn('status', [$completed, $partial])
             ->update([
-                'status' => DB::raw("CASE WHEN failed_count > 0 THEN 'partial_failure' ELSE 'completed' END"),
+                'status' => DB::raw("CASE WHEN failed_count > 0 THEN '{$partial}' ELSE '{$completed}' END"),
             ]);
     }
 }

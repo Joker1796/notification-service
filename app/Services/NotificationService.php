@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\NotificationBatchStatus;
 use App\Enums\NotificationChannel;
 use App\Enums\NotificationStatus;
 use App\Enums\NotificationType;
@@ -30,7 +31,12 @@ class NotificationService
         // Fast-path: single Redis GET (replaces separate EXISTS + GET calls).
         $existingBatchId = $this->deduplication->findBatchId($idempotencyKey);
         if ($existingBatchId !== null) {
-            return NotificationBatch::findOrFail($existingBatchId);
+            // Use find() instead of findOrFail() — a stale Redis entry (batch deleted)
+            // must not throw a 404; fall through to create a new batch instead.
+            $existing = NotificationBatch::find($existingBatchId);
+            if ($existing !== null) {
+                return $existing;
+            }
         }
 
         // Deduplicate recipient list before counting and inserting.
@@ -48,7 +54,7 @@ class NotificationService
                     'channel'         => $channel,
                     'type'            => $type,
                     'message'         => $message,
-                    'status'          => 'processing',
+                    'status'          => NotificationBatchStatus::Processing,
                     'total_count'     => count($recipientIds),
                 ]);
 

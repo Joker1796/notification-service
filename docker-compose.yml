@@ -109,7 +109,7 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     ports:
-      - "15672:15672"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: app
       RABBITMQ_DEFAULT_PASS: secret
@@ -125,6 +125,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --requirepass secret
     volumes:
       - redisdata:/data
     networks:

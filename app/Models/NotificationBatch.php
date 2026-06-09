@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\NotificationBatchStatus;
 use App\Enums\NotificationChannel;
 use App\Enums\NotificationType;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
@@ -25,7 +26,8 @@ class NotificationBatch extends Model
 
     protected $casts = [
         'channel' => NotificationChannel::class,
-        'type' => NotificationType::class,
+        'type'    => NotificationType::class,
+        'status'  => NotificationBatchStatus::class,
     ];
 
     public function notifications(): HasMany

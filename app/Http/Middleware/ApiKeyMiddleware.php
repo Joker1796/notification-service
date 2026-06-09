@@ -12,7 +12,7 @@ class ApiKeyMiddleware
     {
         $configuredKey = config('app.api_key');
 
-        if (empty($configuredKey) || $request->header('X-Api-Key') !== $configuredKey) {
+        if (empty($configuredKey) || !hash_equals($configuredKey, (string) $request->header('X-Api-Key', ''))) {
             return response()->json(['message' => 'Unauthorized'], 401);
         }
 
