@@ -141,4 +141,59 @@ class RecoverStuckNotificationsCommandTest extends TestCase
             ->expectsOutput('Phase 2: no orphaned "queued" notifications.')
             ->assertExitCode(0);
     }
+
+    // --- --minutes threshold ---
+
+    public function test_custom_minutes_threshold_is_respected(): void
+    {
+        $batch        = $this->makeBatch('recover-minutes-001');
+        $notification = $this->makeNotification($batch->id, NotificationStatus::Sent);
+
+        // 3 minutes old — below threshold of 5, must NOT be recovered.
+        Notification::where('id', $notification->id)->update(['updated_at' => now()->subMinutes(3)]);
+
+        $this->artisan('notifications:recover-stuck', ['--minutes' => 5])->assertExitCode(0);
+
+        $notification->refresh();
+        $this->assertEquals(NotificationStatus::Sent, $notification->status);
+
+        // Same notification but now threshold is 2 — must be recovered.
+        $this->artisan('notifications:recover-stuck', ['--minutes' => 2])->assertExitCode(0);
+
+        $notification->refresh();
+        $this->assertEquals(NotificationStatus::Queued, $notification->status);
+    }
+
+    // --- Queue routing ---
+
+    public function test_phase2_redispatches_to_correct_queue_by_notification_type(): void
+    {
+        Queue::fake();
+
+        $batch = NotificationBatch::create([
+            'id'              => Str::uuid(),
+            'idempotency_key' => 'recover-queue-001',
+            'channel'         => NotificationChannel::Email->value,
+            'type'            => NotificationType::Marketing->value,
+            'message'         => 'Sale!',
+            'status'          => 'processing',
+            'total_count'     => 1,
+        ]);
+
+        $notification = Notification::create([
+            'id'            => Str::uuid(),
+            'batch_id'      => $batch->id,
+            'subscriber_id' => 1,
+            'channel'       => NotificationChannel::Email->value,
+            'type'          => NotificationType::Marketing->value,
+            'message'       => 'Sale!',
+            'status'        => NotificationStatus::Queued->value,
+        ]);
+
+        Notification::where('id', $notification->id)->update(['created_at' => now()->subMinutes(10)]);
+
+        $this->artisan('notifications:recover-stuck', ['--minutes' => 5])->assertExitCode(0);
+
+        Queue::assertPushedOn('notifications.marketing', ProcessNotificationJob::class);
+    }
 }

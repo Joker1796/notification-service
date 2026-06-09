@@ -362,4 +362,247 @@ class NotificationFlowTest extends TestCase
         $this->getJson('/api/v1/subscribers/1/notifications')
             ->assertStatus(401);
     }
+
+    // --- Validation ---
+
+    public function test_bulk_request_with_invalid_channel_returns_422(): void
+    {
+        $this->postJson('/api/v1/notifications/bulk', [
+            'channel'         => 'fax',
+            'type'            => 'transactional',
+            'message'         => 'Test',
+            'idempotency_key' => 'val-ch-001',
+            'recipient_ids'   => [1],
+        ])->assertStatus(422)->assertJsonValidationErrors(['channel']);
+    }
+
+    public function test_bulk_request_with_missing_required_fields_returns_422(): void
+    {
+        $this->postJson('/api/v1/notifications/bulk', [])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['channel', 'type', 'message', 'idempotency_key', 'recipient_ids']);
+    }
+
+    public function test_bulk_request_with_empty_recipient_ids_returns_422(): void
+    {
+        $this->postJson('/api/v1/notifications/bulk', [
+            'channel'         => 'sms',
+            'type'            => 'transactional',
+            'message'         => 'Test',
+            'idempotency_key' => 'val-empty-001',
+            'recipient_ids'   => [],
+        ])->assertStatus(422)->assertJsonValidationErrors(['recipient_ids']);
+    }
+
+    public function test_bulk_request_with_message_too_long_returns_422(): void
+    {
+        $this->postJson('/api/v1/notifications/bulk', [
+            'channel'         => 'email',
+            'type'            => 'marketing',
+            'message'         => str_repeat('x', 1001),
+            'idempotency_key' => 'val-msg-001',
+            'recipient_ids'   => [1],
+        ])->assertStatus(422)->assertJsonValidationErrors(['message']);
+    }
+
+    public function test_bulk_request_with_duplicate_recipient_ids_returns_422(): void
+    {
+        $this->postJson('/api/v1/notifications/bulk', [
+            'channel'         => 'sms',
+            'type'            => 'transactional',
+            'message'         => 'Test',
+            'idempotency_key' => 'val-dup-001',
+            'recipient_ids'   => [1, 2, 2, 3],
+        ])->assertStatus(422)->assertJsonValidationErrors(['recipient_ids.2']);
+    }
+
+    // --- Subscriber notifications edge cases ---
+
+    public function test_subscriber_with_no_notifications_returns_empty_data(): void
+    {
+        $this->getJson('/api/v1/subscribers/99999/notifications')
+            ->assertStatus(200)
+            ->assertJson([
+                'subscriber_id' => 99999,
+                'data'          => [],
+                'meta'          => ['total' => 0, 'current_page' => 1],
+            ]);
+    }
+
+    public function test_per_page_zero_is_clamped_to_one(): void
+    {
+        $this->getJson('/api/v1/subscribers/1/notifications?per_page=0')
+            ->assertStatus(200)
+            ->assertJsonPath('meta.per_page', 1);
+    }
+
+    public function test_per_page_negative_is_clamped_to_one(): void
+    {
+        $this->getJson('/api/v1/subscribers/1/notifications?per_page=-5')
+            ->assertStatus(200)
+            ->assertJsonPath('meta.per_page', 1);
+    }
+
+    public function test_per_page_over_limit_is_clamped_to_hundred(): void
+    {
+        $this->getJson('/api/v1/subscribers/1/notifications?per_page=500')
+            ->assertStatus(200)
+            ->assertJsonPath('meta.per_page', 100);
+    }
+
+    // --- Bug-fix verifications ---
+
+    public function test_non_temporary_exception_resets_notification_to_queued(): void
+    {
+        $this->app->instance(MockSmsProvider::class, new class extends MockSmsProvider {
+            public function send(int $subscriberId, string $message): void
+            {
+                throw new \RuntimeException('Unexpected network error');
+            }
+        });
+
+        $batch = NotificationBatch::create([
+            'id'              => Str::uuid(),
+            'idempotency_key' => 'non-temp-ex-001',
+            'channel'         => NotificationChannel::Sms->value,
+            'type'            => NotificationType::Transactional->value,
+            'message'         => 'Test',
+            'status'          => 'processing',
+            'total_count'     => 1,
+        ]);
+
+        $notification = Notification::create([
+            'id'            => Str::uuid(),
+            'batch_id'      => $batch->id,
+            'subscriber_id' => 1,
+            'channel'       => NotificationChannel::Sms->value,
+            'type'          => NotificationType::Transactional->value,
+            'message'       => 'Test',
+            'status'        => NotificationStatus::Queued->value,
+        ]);
+
+        $job = new ProcessNotificationJob($notification);
+
+        try {
+            app()->call([$job, 'handle']);
+        } catch (\RuntimeException) {}
+
+        $notification->refresh();
+        $this->assertEquals(NotificationStatus::Queued, $notification->status,
+            'A non-TemporaryProviderException must reset status to queued so retries are not wasted');
+        $this->assertEquals(1, $notification->retry_count);
+    }
+
+    public function test_stale_redis_entry_falls_through_to_new_batch(): void
+    {
+        // Register a batch_id that does not exist in the database.
+        app(DeduplicationService::class)->register('stale-key', (string) Str::uuid());
+
+        $response = $this->postJson('/api/v1/notifications/bulk', [
+            'channel'         => 'sms',
+            'type'            => 'transactional',
+            'message'         => 'Test',
+            'idempotency_key' => 'stale-key',
+            'recipient_ids'   => [1],
+        ]);
+
+        $response->assertStatus(202);
+        $this->assertDatabaseCount('notification_batches', 1);
+        $this->assertDatabaseCount('notifications', 1);
+    }
+
+    public function test_duplicate_recipient_ids_are_deduplicated_at_service_level(): void
+    {
+        /** @var \App\Services\NotificationService $service */
+        $service = app(\App\Services\NotificationService::class);
+
+        $batch = $service->dispatchBulk(
+            channel: NotificationChannel::Sms,
+            type: NotificationType::Transactional,
+            message: 'Test',
+            idempotencyKey: 'dedup-service-001',
+            recipientIds: [1, 2, 2, 3, 1],
+        );
+
+        $this->assertEquals(3, $batch->total_count);
+        $this->assertDatabaseCount('notifications', 3);
+    }
+
+    // --- Batch finalization ---
+
+    public function test_batch_is_marked_completed_when_all_notifications_delivered(): void
+    {
+        $this->app->instance(MockSmsProvider::class, new class extends MockSmsProvider {
+            public function send(int $subscriberId, string $message): void {}
+        });
+
+        $batch = NotificationBatch::create([
+            'id'              => Str::uuid(),
+            'idempotency_key' => 'finalize-ok-001',
+            'channel'         => NotificationChannel::Sms->value,
+            'type'            => NotificationType::Transactional->value,
+            'message'         => 'Test',
+            'status'          => 'processing',
+            'total_count'     => 2,
+        ]);
+
+        $n1 = Notification::create([
+            'id' => Str::uuid(), 'batch_id' => $batch->id, 'subscriber_id' => 1,
+            'channel' => NotificationChannel::Sms->value, 'type' => NotificationType::Transactional->value,
+            'message' => 'Test', 'status' => NotificationStatus::Queued->value,
+        ]);
+        $n2 = Notification::create([
+            'id' => Str::uuid(), 'batch_id' => $batch->id, 'subscriber_id' => 2,
+            'channel' => NotificationChannel::Sms->value, 'type' => NotificationType::Transactional->value,
+            'message' => 'Test', 'status' => NotificationStatus::Queued->value,
+        ]);
+
+        ProcessNotificationJob::dispatchSync($n1);
+        ProcessNotificationJob::dispatchSync($n2);
+
+        $batch->refresh();
+        $this->assertEquals('completed', $batch->status->value);
+        $this->assertEquals(2, $batch->completed_count);
+        $this->assertEquals(0, $batch->failed_count);
+    }
+
+    public function test_batch_is_marked_partial_failure_when_some_notifications_fail(): void
+    {
+        $this->app->instance(MockSmsProvider::class, new class extends MockSmsProvider {
+            public function send(int $subscriberId, string $message): void {}
+        });
+
+        $batch = NotificationBatch::create([
+            'id'              => Str::uuid(),
+            'idempotency_key' => 'finalize-partial-001',
+            'channel'         => NotificationChannel::Sms->value,
+            'type'            => NotificationType::Transactional->value,
+            'message'         => 'Test',
+            'status'          => 'processing',
+            'total_count'     => 2,
+        ]);
+
+        $n1 = Notification::create([
+            'id' => Str::uuid(), 'batch_id' => $batch->id, 'subscriber_id' => 1,
+            'channel' => NotificationChannel::Sms->value, 'type' => NotificationType::Transactional->value,
+            'message' => 'Test', 'status' => NotificationStatus::Queued->value,
+        ]);
+        $n2 = Notification::create([
+            'id' => Str::uuid(), 'batch_id' => $batch->id, 'subscriber_id' => 2,
+            'channel' => NotificationChannel::Sms->value, 'type' => NotificationType::Transactional->value,
+            'message' => 'Test', 'status' => NotificationStatus::Queued->value,
+        ]);
+
+        // n1 succeeds.
+        ProcessNotificationJob::dispatchSync($n1);
+
+        // n2 exhausts all retries: call failed() directly, as the queue would after max attempts.
+        $job = new ProcessNotificationJob($n2);
+        $job->failed(new TemporaryProviderException('Provider down'));
+
+        $batch->refresh();
+        $this->assertEquals('partial_failure', $batch->status->value);
+        $this->assertEquals(1, $batch->completed_count);
+        $this->assertEquals(1, $batch->failed_count);
+    }
 }
