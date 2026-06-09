@@ -1,5 +1,7 @@
 # Notification Service
 
+[![GitHub](https://img.shields.io/badge/GitHub-Joker1796%2Fnotification--service-blue?logo=github)](https://github.com/Joker1796/notification-service)
+
 Микросервис массовой рассылки уведомлений (SMS/Email) с приоритезацией трафика, отслеживанием статусов и гарантией доставки.
 
 ## Технологический стек
