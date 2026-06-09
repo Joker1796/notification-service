@@ -19,6 +19,8 @@ class NotificationBatch extends Model
         'message',
         'status',
         'total_count',
+        'completed_count',
+        'failed_count',
     ];
 
     protected $casts = [

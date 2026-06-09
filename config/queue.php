@@ -74,9 +74,10 @@ return [
         ],
 
         'rabbitmq_high' => [
-            'driver' => 'rabbitmq',
-            'queue' => 'notifications.transactional',
-            'connection' => PhpAmqpLib\Connection\AMQPLazyConnection::class,
+            'driver'       => 'rabbitmq',
+            'after_commit' => true,
+            'queue'        => 'notifications.transactional',
+            'connection'   => PhpAmqpLib\Connection\AMQPLazyConnection::class,
             'hosts' => [
                 [
                     'host' => env('RABBITMQ_HOST', 'rabbitmq'),
@@ -101,9 +102,10 @@ return [
         ],
 
         'rabbitmq_low' => [
-            'driver' => 'rabbitmq',
-            'queue' => 'notifications.marketing',
-            'connection' => PhpAmqpLib\Connection\AMQPLazyConnection::class,
+            'driver'       => 'rabbitmq',
+            'after_commit' => true,
+            'queue'        => 'notifications.marketing',
+            'connection'   => PhpAmqpLib\Connection\AMQPLazyConnection::class,
             'hosts' => [
                 [
                     'host' => env('RABBITMQ_HOST', 'rabbitmq'),

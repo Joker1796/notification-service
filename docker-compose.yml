@@ -35,7 +35,7 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-    command: php artisan queue:work rabbitmq_high --queue=notifications.transactional --tries=3 --sleep=3 --max-time=3600
+    command: php artisan queue:work rabbitmq_high --queue=notifications.transactional --tries=3 --sleep=3 --max-time=3600 --max-jobs=1000
     volumes:
       - .:/var/www
     environment:
@@ -55,7 +55,7 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-    command: php artisan queue:work rabbitmq_low --queue=notifications.marketing --tries=3 --sleep=3 --max-time=3600
+    command: php artisan queue:work rabbitmq_low --queue=notifications.marketing --tries=3 --sleep=3 --max-time=3600 --max-jobs=1000
     volumes:
       - .:/var/www
     environment:

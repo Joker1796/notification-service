@@ -10,8 +10,8 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->app->bind(MockSmsProvider::class, fn () => new MockSmsProvider());
-        $this->app->bind(MockEmailProvider::class, fn () => new MockEmailProvider());
+        // Concrete providers are auto-resolved by the DI container.
+        // NotificationProviderFactory receives them via constructor injection.
     }
 
     public function boot(): void {}

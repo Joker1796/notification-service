@@ -24,7 +24,7 @@ return new class extends Migration
             $table->timestamps();
 
             $table->foreign('batch_id')->references('id')->on('notification_batches')->cascadeOnDelete();
-            $table->index('subscriber_id');
+            $table->index(['subscriber_id', 'created_at']); // composite for paginated history queries
             $table->index('status');
         });
     }

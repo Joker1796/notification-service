@@ -27,12 +27,14 @@ class NotificationService
         string $idempotencyKey,
         array $recipientIds,
     ): NotificationBatch {
-        // Fast-path: Redis cache hit (avoids a DB write on duplicates)
-        if ($this->deduplication->isDuplicate($idempotencyKey)) {
-            $batchId = $this->deduplication->getBatchId($idempotencyKey);
-
-            return NotificationBatch::findOrFail($batchId);
+        // Fast-path: single Redis GET (replaces separate EXISTS + GET calls).
+        $existingBatchId = $this->deduplication->findBatchId($idempotencyKey);
+        if ($existingBatchId !== null) {
+            return NotificationBatch::findOrFail($existingBatchId);
         }
+
+        // Deduplicate recipient list before counting and inserting.
+        $recipientIds = array_values(array_unique($recipientIds));
 
         $batch = null;
 
@@ -41,25 +43,33 @@ class NotificationService
             // The unique index on idempotency_key is the authoritative idempotency guard.
             DB::transaction(function () use ($channel, $type, $message, $idempotencyKey, $recipientIds, &$batch) {
                 $batch = NotificationBatch::create([
-                    'id' => Str::uuid(),
+                    'id'              => Str::uuid(),
                     'idempotency_key' => $idempotencyKey,
-                    'channel' => $channel,
-                    'type' => $type,
-                    'message' => $message,
-                    'status' => 'processing',
-                    'total_count' => count($recipientIds),
+                    'channel'         => $channel,
+                    'type'            => $type,
+                    'message'         => $message,
+                    'status'          => 'processing',
+                    'total_count'     => count($recipientIds),
                 ]);
 
-                foreach ($recipientIds as $subscriberId) {
-                    Notification::create([
-                        'id' => Str::uuid(),
-                        'batch_id' => $batch->id,
-                        'subscriber_id' => $subscriberId,
-                        'channel' => $channel,
-                        'type' => $type,
-                        'message' => $message,
-                        'status' => NotificationStatus::Queued,
-                    ]);
+                // Bulk-insert all notifications in chunks of 500 to avoid hitting
+                // PostgreSQL's parameter limit and to keep INSERT statements compact.
+                $now  = now();
+                $rows = array_map(fn (int $subscriberId) => [
+                    'id'            => (string) Str::uuid(),
+                    'batch_id'      => $batch->id,
+                    'subscriber_id' => $subscriberId,
+                    'channel'       => $channel->value,
+                    'type'          => $type->value,
+                    'message'       => $message,
+                    'status'        => NotificationStatus::Queued->value,
+                    'retry_count'   => 0,
+                    'created_at'    => $now,
+                    'updated_at'    => $now,
+                ], $recipientIds);
+
+                foreach (array_chunk($rows, 500) as $chunk) {
+                    Notification::insert($chunk);
                 }
             });
         } catch (QueryException $e) {
@@ -71,25 +81,17 @@ class NotificationService
             throw $e;
         }
 
-        // Register in Redis BEFORE dispatching jobs so that any crash between
-        // dispatch and here does not leave a window where the next request creates
-        // a duplicate batch (the DB constraint protects, but Redis prevents the query).
+        // Register in Redis after the transaction so that duplicate requests get the
+        // fast-path on subsequent calls (DB constraint is the authoritative guard).
         $this->deduplication->register($idempotencyKey, $batch->id);
 
-        $queue = $type === NotificationType::Transactional
-            ? 'notifications.transactional'
-            : 'notifications.marketing';
-
-        $connection = $type === NotificationType::Transactional
-            ? 'rabbitmq_high'
-            : 'rabbitmq_low';
-
-        // Load notifications created inside the transaction and dispatch them.
-        foreach ($batch->notifications as $notification) {
-            ProcessNotificationJob::dispatch($notification)
-                ->onConnection($connection)
-                ->onQueue($queue);
-        }
+        // Use cursor() to stream notifications one-by-one, avoiding loading all
+        // Eloquent models into memory at once (up to 10 000 rows).
+        $batch->notifications()->cursor()->each(
+            fn (Notification $notification) => ProcessNotificationJob::dispatch($notification)
+                ->onConnection($type->queueConnection())
+                ->onQueue($type->queueName())
+        );
 
         return $batch;
     }

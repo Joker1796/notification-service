@@ -1,0 +1,10 @@
+services:
+  postgres:
+    ports:
+      - "5433:5432"
+  redis:
+    ports:
+      - "6380:6379"
+  rabbitmq:
+    ports:
+      - "5672:5672"

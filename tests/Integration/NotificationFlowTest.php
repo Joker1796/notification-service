@@ -14,7 +14,6 @@ use App\Providers\Notification\MockSmsProvider;
 use App\Providers\Notification\NotificationProviderInterface;
 use App\Services\DeduplicationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -25,9 +24,11 @@ class NotificationFlowTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        // Flush Redis between tests so idempotency keys from one test
-        // do not bleed into the next (RefreshDatabase only resets the DB).
-        Redis::flushdb();
+        // Flush only the DeduplicationService's own Redis keys between tests
+        // so idempotency state from one test does not bleed into the next.
+        // Using flush() instead of flushdb() avoids wiping data from other
+        // processes that may share the same Redis instance in CI.
+        app(DeduplicationService::class)->flush();
         // Attach the API key header to all test requests automatically.
         $this->withHeaders(['X-Api-Key' => config('app.api_key')]);
     }
@@ -70,7 +71,7 @@ class NotificationFlowTest extends TestCase
     public function test_job_processes_notification_and_sets_delivered_status(): void
     {
         // Job resolves app(MockSmsProvider::class) directly — bind the concrete class.
-        $this->app->instance(MockSmsProvider::class, new class implements NotificationProviderInterface {
+        $this->app->instance(MockSmsProvider::class, new class extends MockSmsProvider {
             public function send(int $subscriberId, string $message): void {}
         });
 
@@ -128,7 +129,7 @@ class NotificationFlowTest extends TestCase
 
         // Simulate 3 failed attempts then call failed().
         // Job resolves app(MockEmailProvider::class) directly — bind the concrete class.
-        $failingProvider = new class implements NotificationProviderInterface {
+        $failingProvider = new class extends MockEmailProvider {
             public function send(int $subscriberId, string $message): void
             {
                 throw new TemporaryProviderException('Provider down');
@@ -137,19 +138,20 @@ class NotificationFlowTest extends TestCase
 
         $this->app->instance(MockEmailProvider::class, $failingProvider);
 
+        // app()->call() triggers DI injection for handle(NotificationProviderFactory $factory).
         // Attempt 1
-        try { $job->handle(); } catch (TemporaryProviderException) {}
+        try { app()->call([$job, 'handle']); } catch (TemporaryProviderException) {}
         $notification->refresh();
         $this->assertEquals(NotificationStatus::Queued, $notification->status);
         $this->assertEquals(1, $notification->retry_count);
 
         // Attempt 2
-        try { $job->handle(); } catch (TemporaryProviderException) {}
+        try { app()->call([$job, 'handle']); } catch (TemporaryProviderException) {}
         $notification->refresh();
         $this->assertEquals(2, $notification->retry_count);
 
         // Attempt 3
-        try { $job->handle(); } catch (TemporaryProviderException) {}
+        try { app()->call([$job, 'handle']); } catch (TemporaryProviderException) {}
         $notification->refresh();
         $this->assertEquals(3, $notification->retry_count);
 
@@ -297,7 +299,7 @@ class NotificationFlowTest extends TestCase
         // Pass $providerCalled by reference through a wrapper so the closure can
         // mutate the outer variable (anonymous class constructors accept references).
         $ref = &$providerCalled;
-        $this->app->instance(MockSmsProvider::class, new class ($ref) implements NotificationProviderInterface {
+        $this->app->instance(MockSmsProvider::class, new class ($ref) extends MockSmsProvider {
             public function __construct(private bool &$called) {}
 
             public function send(int $subscriberId, string $message): void

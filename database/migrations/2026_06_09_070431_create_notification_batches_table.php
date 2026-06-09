@@ -19,6 +19,8 @@ return new class extends Migration
             $table->text('message');
             $table->string('status', 20)->default('processing');
             $table->unsignedInteger('total_count');
+            $table->unsignedInteger('completed_count')->default(0);
+            $table->unsignedInteger('failed_count')->default(0);
             $table->timestamps();
         });
     }

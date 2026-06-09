@@ -17,7 +17,7 @@ class BulkNotificationRequest extends FormRequest
             'message' => ['required', 'string', 'max:1000'],
             'idempotency_key' => ['required', 'string', 'max:255'],
             'recipient_ids' => ['required', 'array', 'min:1', 'max:10000'],
-            'recipient_ids.*' => ['required', 'integer', 'min:1'],
+            'recipient_ids.*' => ['required', 'integer', 'min:1', 'distinct'],
         ];
     }
 }
